@@ -1,0 +1,466 @@
+---
+output: html_document
+---
+<center> <h1>Initial Analysis</h1> </center>
+<center> <h1>S. Jackson Kelley</h1> </center>
+<center> <h1>A01281942</h1> </center>
+
+##Reading in the data
+Here we read in data exported from the mongoDB database running on the AWS server.  Outcomes contains only the itemID, categoryID/Name, and final selling price.  forSale contains any features I thought might be of use to a machine learning algorithm.  This includes things like the item's title string as well as location.
+```{r}
+outcomes = read.csv("completedItems_2.csv",header=TRUE)
+forSale = read.csv("forSale_2.csv",header=TRUE)
+head(outcomes)
+head(forSale)
+```
+Above is shown an overview of every feature collected from the eBay API in the forSale dataframe.  A few confusing one's will be noted for the purposes of this presentation.  
+
+* **calculateShipping** is a boolean that tells me whether the eBay API returned the shipping price for an item, or if this item needs to be queried with a separate API call to get it's shipping price.  The items with true will probably be imputed with an average of all shipping prices.
+
+* **dateQueried** is the date my algorithm found the item on eBay.
+
+* **endDate** is when the item was no longer for sale (I think I will turn these into categoric variables to see if day of the week is an important variable to price prediction)
+
+* **bidCount** is how many bids have been placed on this item when the my algorithm found it on eBay.
+
+* **listingType** describes whether the item is a FixedPrice item or an item for Auction.
+
+* **conditionId** is a condition code used by eBay to desribe an item's condition, 1000 is new, 3000, is used, 1500 is new with conditions attached to the item.
+
+* **timeLeft** specifies how much longer this item is for sale.
+
+##Pre-processing
+I will perform the imputation of shipping costs now.  First we change the -1 values to NA's, and then impute NA's with the average shipping cost for non NA items.
+```{r, include = FALSE}
+library(Hmisc)
+```
+```{r}
+forSale$shippingCost[forSale$calculateShipping == "true"] = NA
+forSale$shippingCost = with (forSale,impute(shippingCost,mean))
+forSale$bidCount     = with(forSale, impute(bidCount,mean))
+forSale$bidCount = as.numeric(forSale$bidCount)
+```
+
+Calculating imputed totalPrice and removing sold items that aren't video game consoles.
+```{r}
+forSale$totalPrice = forSale$currentPrice + forSale$shippingCost
+forSale$totalPrice = as.numeric(forSale$totalPrice)
+outcomes = outcomes[outcomes$categoryName == "Video Game Consoles",]
+
+```
+
+
+###Dates
+Here I'm converting date strings to actual R dates.
+```{r}
+dates = as.Date(forSale$endDate)
+forSale$dayOfWeek = as.factor(weekdays(dates))
+
+```
+
+###Outliers
+We can use R's built in boxplot code to detect and remove outliers from the dataset.
+```{r}
+outliers = boxplot.stats(forSale$totalPrice)$out
+forSale = forSale[!forSale$totalPrice %in% outliers,]
+forSale = forSale[(forSale$totalPrice > 100),]
+```
+
+
+
+##Summary
+Here we summarize the data to see if anything stands out as interesting in the data for further analysis or visualization.
+
+###forSale Summary
+It looks like surprisingly there are a higher number of Playstation 4's with the title "SONY PLAYSTATION 4 BASIC SET 500 GB BLACK CONSOLE" and "SONY PLAYSTATION 4 (LATEST MODEL)- 500 GB BLACK CONSOLE" in the title.  This may be due to the fact that many people are buying and relisting with the same title, similar to my software.  We also print out the SD for all playstation 4's in order to get a better idea of how variable the prices are.
+```{r}
+summary(forSale)
+sd(forSale$totalPrice)
+```
+
+###Initial Questions
+* Does a higher bidCount the day before the end date result in a higher price?
+
+* Does buyItNow effect price?
+
+* Does the text in the item title effect price? (appears to be significant after totalCost)
+
+* Does day of the week effect price?
+
+###Outcomes Summary
+Really there isn't much to this data as it's our outcome we're trying to predict.  We do see that the average price of all Playstation 4's is 267USD.  
+
+It appears that the SD's of the two datasets are similar, which gives me some comfort in the data gathering methods.
+
+```{r}
+summary(outcomes)
+sd(outcomes$sellingPrice)
+```
+
+
+
+##Visualization
+I'd first like to see the histogram of these items and see just how variable their prices are.
+
+###Histogram of Price Counts for Sold Playstation4s
+```{r}
+library(ggplot2)
+ggplot(outcomes, aes(sellingPrice, fill = categoryName)) +
+  geom_histogram(binwidth = 5)
+```
+###Histogram of Price Counts for Playstation4s currently for sale
+```{r}
+ggplot(forSale, aes(totalPrice, fill = listingType)) +
+  geom_histogram(binwidth = 5)
+```
+
+These data both appear to be positively skewed.
+
+###Plotting the location of sold Playstation4s
+```{r,cache=TRUE,include=FALSE}
+library(ggmap)
+locations <- geocode(as.character(forSale$location))
+```
+The map plot shows a high number of Playstation 4's are sold in the North East of the US and around the Los Angeles area.  This is probably simple due to the higher populations in these areas.
+
+
+```{r,cache=TRUE}
+library(ggmap)
+map1 = ggmap(get_map(location = "United States",zoom=4))+geom_point(data=locations, aes(x=lon,y=lat),color="orange")
+
+map1
+```
+
+
+##Gluing outcome and forSale dataset
+Now we merge the outcome into the forSale dataset to train, CV, and test machine learning algorithms against it.
+```{r}
+fullDataset <- merge(forSale,outcomes,by="X_id")
+summary(fullDataset)
+```
+
+
+##Day Of Week
+Is the day of the week statistically significant?  Here we see the average price for each day of the week plotted in a boxplot.
+```{r}
+averagePricePerDay = with(fullDataset, tapply(sellingPrice, dayOfWeek,mean))
+plotDF =aggregate(fullDataset$sellingPrice ~ fullDataset$dayOfWeek, FUN = mean)
+plotDF
+ggplot(fullDataset, aes(y = sellingPrice, x = factor(dayOfWeek))) +scale_x_discrete("Day Of The Week") + 
+        scale_y_continuous("Final Selling Price") + geom_boxplot(outlier.color="red")
+```
+
+But is this statistically significant? A pairwise t-test across the days of the week as well as a oneway ANOVA shows that it is not.  This may be due to the fact that my dataset is still relatively small though.
+```{r}
+pairwise.t.test(fullDataset$sellingPrice,
+                fullDataset$dayOfWeek, alternative ="two.sided")
+oneway.test(sellingPrice ~ dayOfWeek, data = fullDataset)
+```
+
+
+##Bid Count
+It doesn't look as though the number of bids effects price that much.  We do see a slightly positive correlation in regard to new items with conditions attached to them, but again, this could be due to lack of data.
+```{r}
+p1 <- ggplot(fullDataset, aes(x = bidCount, y = sellingPrice, color = factor(conditionDisplayName))) + geom_point() + geom_smooth(method = "lm", se = TRUE)
+p1
+lmOut = lm(sellingPrice ~ bidCount, data = fullDataset)
+summary(lmOut)
+```
+We also see the p-value on a linear regression as too high for statistical significance.
+
+##Buy It Now
+Does the ability to "buy it now" effect price in any way?
+```{r}
+averagePricePerBuyItNow = with(fullDataset, tapply(sellingPrice, buyItNowAvailable,mean))
+plotDF = aggregate(fullDataset$sellingPrice ~ fullDataset$buyItNowAvailable, FUN = mean)
+plotDF
+ggplot(fullDataset, aes(y = sellingPrice, x = factor(buyItNowAvailable))) +scale_x_discrete("Buy It Now Available") + 
+        scale_y_continuous("Final Selling Price") + geom_boxplot(outlier.color="red")
+```
+
+But is this statistically significant? A pairwise t-test across the BuyItNow variable as well as a oneway ANOVA shows that it actually may be.  Again, this may be due to the fact that my dataset is still relatively small though.
+```{r}
+pairwise.t.test(fullDataset$sellingPrice,
+                fullDataset$buyItNowAvailable, alternative ="two.sided")
+oneway.test(sellingPrice ~ buyItNowAvailable, data = fullDataset)
+```
+
+
+##Title Analysis
+Here we analyze the titles used in listings.  This is done by taking relatively sparse terms using tf-idf and looking to see if any of these terms stand out in relation to price.  Another question could be, does using a similar title to other listings lead to a higher selling price?
+```{r}
+library(tm)
+library(wordcloud)
+text = Corpus(VectorSource(fullDataset$title))
+text = tm_map(text,removePunctuation)
+text = tm_map(text,content_transformer(tolower))
+text = tm_map(text,removeWords,stopwords("english"))
+# for(i in seq(text)){
+#         text[[i]] = gsub("playstation4","playstation4",text[[i]])
+#         text[[i]] = gsub("playstation 4","playstation4",text[[i]])
+#         text[[i]] = gsub("playstation","playstation4",text[[i]])
+# }
+# text <- tm_map(text, stemDocument)
+text <- tm_map(text, stripWhitespace)
+# text <- tm_map(text,PlainTextDocument)
+dtm = DocumentTermMatrix(text)
+freq = colSums(as.matrix(dtm))
+# length(freq)
+ord = order(freq)
+# freq[ord]
+dtms = removeSparseTerms(dtm,.98)
+```
+
+###A Wordcloud of Playstation4 titles
+Here's a nice visualization of the titles, for use in presentations as well as the poster.
+```{r}
+set.seed(142)
+wordcloud(names(freq),freq,max.words=100,rot.per=.2,colors=brewer.pal(6,"Dark2"))
+
+```
+
+
+##Cleaning the Title
+Here we add the split up title data frame to the full dataset to add it as a feature for prediction.
+```{r}
+dtmsDF = as.data.frame(as.matrix(dtms))
+dtmsDF$X_id = fullDataset$X_id
+fullDataset = merge(fullDataset,dtmsDF, by = "X_id")
+fullDataset$title = NULL
+names(fullDataset) = make.names(names(fullDataset))
+```
+
+##Machine Learning
+Here I'm training multiple different machine learning algorithms in order to compare them against one another using RMSE on the test set.
+
+###Cross-Validation of the Full Dataset
+Here I'm splitting the data into a test and train set for cross-validation, as well as a few small preprocessing steps.
+```{r}
+library(randomForest)
+library(caret)
+library(rpart)
+library(mlbench)
+
+set.seed(415)
+smp_size <- floor(0.75 * nrow(fullDataset))
+train_indices = sample(seq_len(nrow(fullDataset)),size=smp_size)
+trainingData = fullDataset[train_indices,]
+testData     = fullDataset[-train_indices,]
+
+make.names(levels(trainingData))
+```
+
+
+###RandomForest
+Here I'm training two Random Forest algorithms using the caret package, which allows me to do k-fold repeated cross validation, as well as tune parameters across the training (see the tunegrid object)
+```{r,cache=TRUE,include=FALSE}
+trainingData$title = NULL;
+RFctrl = trainControl(method="repeatedcv", number=10, repeats= 3,search = "grid")
+tunegrid = expand.grid(.mtry=c(1:15))
+modelRF = train(sellingPrice ~
+                        currentPrice +
+                        totalPrice +
+                        bidCount +
+                        listingType +
+                        conditionId +
+                        dayOfWeek +
+                        edition,data=trainingData, method="rf",trControl=RFctrl,tuneGrid=tunegrid,importance=TRUE)
+```
+
+
+Here I use out of bag error as the metric for tuning.
+```{r,cache=TRUE, include=FALSE}
+RFctrl_2 = trainControl(method="oob")
+modelRF_2 = train(sellingPrice ~
+                        currentPrice +
+                        totalPrice +
+                        bidCount +
+                        listingType +
+                        conditionId +
+                        dayOfWeek +
+                        edition,data=trainingData, method="rf",trControl=RFctrl_2,importance=TRUE)
+```
+
+###NeuralNet 
+Here I'm training a neural net, turning over the size variables as well as decay.
+```{r,cache=TRUE}
+library(nnet)
+modelNN = train(trainingData[,c(2,5,10,11,14,15,17,36),],trainingData$sellingPrice, method='nnet', linout=TRUE, trace = FALSE, maxit=1000,
+                #Grid of tuning parameters to try:
+                tuneGrid=expand.grid(.size=c(1,5,10),.decay=c(0,0.001,0.1)))
+
+```
+
+###Linear Regression
+Here I'm training a linear regression model.
+```{r,cach=TRUE}
+modelGLM =  glm(trainingData$sellingPrice ~ trainingData$currentPrice +
+                        trainingData$totalPrice +
+                        trainingData$bidCount +
+                        trainingData$listingType +
+                        trainingData$conditionId)
+modelLM  = lm(trainingData$sellingPrice ~ trainingData$currentPrice +
+                        trainingData$totalPrice +
+                        trainingData$bidCount +
+                        trainingData$listingType +
+                        trainingData$conditionId +
+                        trainingData$dayOfWeek +
+                        trainingData$edition)
+```
+
+###GLMNet
+Here I'm training a GLM with Neural Net hybrid, with repeated cross validation, and lambda and alpha tuning.
+```{r,cach=TRUE}
+library(glmnet)
+library(Matrix)
+GLMNetctrl = trainControl(method="repeatedcv", number=10, repeats= 3,search="grid")
+tunegrid = expand.grid(.alpha=seq(0,1,.1),.lambda=c(0:15))
+modelGLMNet = train(sellingPrice ~
+                        currentPrice +
+                        totalPrice +
+                        bidCount +
+                        listingType +
+                        conditionId +
+                        dayOfWeek +
+                        edition,data=trainingData, method="glmnet",trControl=GLMNetctrl, tuneGrid=tunegrid)
+
+```
+
+
+###SVM
+Here I train 3 different implementations of SVM, each with repeated cross-validation.
+```{r,cache=TRUE}
+library(kernlab)
+SVMctrl = trainControl(method="repeatedcv",number=10,repeats=3)
+
+modelSVM = train(sellingPrice ~
+                        currentPrice +
+                        totalPrice +
+                        bidCount +
+                        listingType +
+                        conditionId +
+                        dayOfWeek +
+                        edition,data=trainingData, method="svmLinear",trControl=SVMctrl)
+
+
+```
+
+
+```{r,cache=TRUE}
+library(kernlab)
+SVMctrlR = trainControl(method="repeatedcv",number=10,repeats=3)
+modelSVMR = train(sellingPrice ~
+                        currentPrice +
+                        totalPrice +
+                        bidCount +
+                        listingType +
+                        conditionId +
+                        dayOfWeek +
+                        edition,data=trainingData, method="svmRadial",trControl=SVMctrl)
+
+
+```
+
+
+```{r,cache=TRUE,include=FALSE}
+library(LiblineaR)
+SVMctrl = trainControl(method="repeatedcv",number=10, repeats=3)
+
+modelSVM3 = train(sellingPrice ~
+                        currentPrice +
+                        totalPrice +
+                        bidCount +
+                        listingType +
+                        conditionId +
+                        dayOfWeek +
+                        edition,data=trainingData, method="svmLinear3",trControl=SVMctrl)
+
+```
+
+
+##Price Prediction
+We now have a price prediction! The items the algorithm predicts to have a higher price than they sold for are items I will target for purchasing, items lower or below a profit threshold will be ignored.
+
+The predictions are made, and RMSE against the test set is taken in order to select the most accurate machine learning algorithms.
+```{r set-options}
+options(width = 1000)
+##RANDOM FOREST PREDICTION
+modelRF
+predictRF <- predict(modelRF, newdata = testData)
+predictRF_2 <- predict(modelRF_2, newdata = testData)
+
+
+# varImp(modelRF_2$finalModel)
+# varImp(modelRF$finalModel)
+# 
+# varImpPlot(modelRF_2$finalModel)
+# varImpPlot(modelRF$finalModel)
+
+```
+
+###RMSE
+Here are the RMSE for each algorithm
+```{r,cache=TRUE}
+RFrmse <- sqrt(mean((predictRF - testData$sellingPrice)^2))
+RFrmse
+
+RFrmse_2 <- sqrt(mean((predictRF_2 - testData$sellingPrice)^2))
+RFrmse_2
+
+##GLM PREDICTION
+# summary(modelGLM)
+GLMpredict = predict(modelGLM,newdata = testData)
+GLMrmse <- sqrt(mean((GLMpredict - testData$sellingPrice)^2))
+GLMrmse
+
+##LM PREDICTION
+# summary(modelLM)
+LMpredict = predict(modelLM,newdata = testData)
+LMrmse <- sqrt(mean((LMpredict - testData$sellingPrice)^2))
+LMrmse
+
+##GLMNet PREDICTION
+GLMNetpredict <- predict(modelGLMNet, newdata = testData)
+GLMNetrmse <- sqrt(mean((GLMNetpredict - testData$sellingPrice)^2))
+GLMNetrmse
+
+
+##NN PREDICTION
+NNpredict <- predict(modelNN, newdata = testData)
+NNrmse <- sqrt(mean((NNpredict - testData$sellingPrice)^2))
+NNrmse
+
+##SVM PREDICTION
+SVMpredict <- predict(modelSVM, newdata = testData)
+SVMrmse <- sqrt(mean((SVMpredict - testData$sellingPrice)^2))
+SVMrmse
+
+##SVM3 PREDICTION
+SVMpredict3 <- predict(modelSVM3, newdata = testData)
+SVMrmse3 <- sqrt(mean((SVMpredict3 - testData$sellingPrice)^2))
+SVMrmse3
+
+##SVMRADIAL PREDICTION
+SVMpredictR <- predict(modelSVMR, newdata = testData)
+SVMrmseR <- sqrt(mean((SVMpredictR - testData$sellingPrice)^2))
+SVMrmseR
+```
+Here we observe that the first Random Forest model as well as the first SVM model perform the best on the test set.  These will be used to detect items for sale below our predicted price.
+
+
+##Output
+Here we plot the outcome against the predictions made by the Random Forest and SVM algorithms, as well as the average of these two predictions.  It is then sorted by the most profitable items.
+```{r}
+SVMprofit = round(SVMpredict-testData$sellingPrice,2)
+RFprofit = round(predictRF-testData$sellingPrice,2)
+printOutRF = data.frame(testData$X_id,testData$sellingPrice,RFprofit,SVMprofit, rowMeans(cbind(SVMprofit,RFprofit)))
+colnames(printOutRF) = c("itemId", "priceSold","predictedProfit_RF","predictedProfit_SVM", "avgPredictedProfit")
+printOutRF = printOutRF[order(printOutRF$avgPredictedProfit,decreasing=TRUE),]
+printOutRF
+```
+
+
+##Overview
+Typically you'd want to minimize error, but in this case, I'm really trying to exploit the error of a machine learning algorithm in a sense.
+I want my algorithm to be "smarter" than the data, the cases where it's "incorrect" (really we're saying the algorithm is correct and the market is not correct) in a certain direction will be cases I expect to see profit.  This was initially difficult for me to wrap my head around when looking at the outputs from the various algorithms.
+
